@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#070a0d">
+<meta name="mobile-web-app-capable" content="yes">\n<meta name="android-mobile-web-app-capable" content="yes">\n<meta name="format-detection" content="telephone=no">
+<title>FLIP 3D Android Engine</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0b0e11;font-family:Arial,Helvetica,sans-serif}
+body{touch-action:none}
+#flip-root{position:fixed;inset:0;overflow:hidden;background:#0b0e11}
+#flip-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#flip-hud{
+  position:absolute;z-index:20;left:14px;top:calc(12px + env(safe-area-inset-top,0px));
+  display:flex;align-items:center;gap:10px;min-height:32px;
+  padding:7px 11px;border:1px solid rgba(83,207,246,.20);border-radius:9px;
+  background:rgba(5,12,16,.38);backdrop-filter:blur(6px);
+  box-shadow:0 0 20px rgba(45,190,240,.08);
+  color:rgba(214,244,252,.92);pointer-events:none;user-select:none
+}
+#flip-brand{font-size:14px;font-weight:800;letter-spacing:2.8px;color:rgba(95,220,255,.86);text-shadow:0 0 8px rgba(61,206,255,.45)}
+#flip-fps{font:12px/1 monospace;color:rgba(119,221,248,.78);padding-left:10px;border-left:1px solid rgba(95,220,255,.20);white-space:nowrap}
+#flip-game-text{font-size:12px;color:rgba(214,244,252,.75);padding-left:10px;border-left:1px solid rgba(95,220,255,.16);white-space:nowrap;max-width:45vw;overflow:hidden;text-overflow:ellipsis}
+#flip-crosshair{
+  position:absolute;z-index:10;left:50%;top:50%;width:20px;height:20px;
+  transform:translate(-50%,-50%);pointer-events:none;opacity:.72
+}
+#flip-crosshair:before,#flip-crosshair:after{content:"";position:absolute;background:rgba(235,246,250,.78);box-shadow:0 0 4px rgba(120,220,255,.28)}
+#flip-crosshair:before{width:2px;height:20px;left:9px;top:0}
+#flip-crosshair:after{width:20px;height:2px;left:0;top:9px}
+#flip-joystick{
+  position:absolute;z-index:25;left:22px;bottom:calc(24px + env(safe-area-inset-bottom,0px));
+  width:138px;height:138px;border-radius:50%;
+  border:2px solid rgba(230,240,245,.32);background:rgba(20,25,29,.20);
+  box-shadow:inset 0 0 25px rgba(255,255,255,.035);display:none
+}
+#flip-stick{
+  position:absolute;left:50%;top:50%;width:66px;height:66px;margin:-33px;
+  border-radius:50%;border:1px solid rgba(240,245,248,.30);
+  background:rgba(190,198,203,.34);box-shadow:0 4px 20px rgba(0,0,0,.25)
+}
+#flip-look-zone{position:absolute;z-index:24;right:0;top:0;width:56%;height:100%;display:none}
+#flip-loader{
+  position:absolute;z-index:100;left:0;right:0;top:0;height:3px;
+  background:rgba(255,255,255,.08);pointer-events:none;transition:opacity .3s
+}
+#flip-loader-bar{height:100%;width:0;background:rgba(86,215,255,.9);box-shadow:0 0 10px rgba(86,215,255,.7);transition:width .2s}
+#flip-error{
+  position:absolute;z-index:110;left:50%;top:18px;transform:translateX(-50%);
+  display:none;max-width:min(700px,92vw);padding:8px 11px;border-radius:7px;
+  border:1px solid rgba(255,110,110,.35);background:rgba(28,8,8,.88);
+  color:#ffc4c4;font:12px/1.4 Arial,sans-serif;pointer-events:none
+}
+
+#flip-joystick,#flip-look-zone{display:block}
+#flip-crosshair{opacity:.58}
+
+</style>
+</head>
+<body>
+<div id="flip-root">
+  <canvas id="flip-canvas"></canvas>
+  <div id="flip-hud">
+    <div id="flip-brand">FLIP 3D</div>
+    <div id="flip-fps">FPS: --</div>
+    <div id="flip-game-text"></div>
+  </div>
+  <div id="flip-crosshair"></div>
+  <div id="flip-joystick"><div id="flip-stick"></div></div>
+  <div id="flip-look-zone"></div>
+  <div id="flip-loader"><div id="flip-loader-bar"></div></div>
+  <div id="flip-error"></div>
+</div>
+
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js";
+
+const FLIP3D = {
+  version: "1.1.0-android",
+  THREE,
+  _state: null,
+
+  init(config = {}) {
+    if (this._state) this.destroy();
+
+    if (!("ontouchstart" in window) && !navigator.maxTouchPoints) {
+      console.warn("FLIP3D Android: touch input is not available. This engine targets Android touch devices.");
+    }
+
+    const root = document.getElementById("flip-root");
+    const canvas = document.getElementById("flip-canvas");
+    const loader = document.getElementById("flip-loader");
+    const loaderBar = document.getElementById("flip-loader-bar");
+    const errorBox = document.getElementById("flip-error");
+    const hudText = document.getElementById("flip-game-text");
+
+    const map = this._validateMap(config.map);
+    const cellSize = Number.isFinite(config.cellSize) ? Math.max(0.25, config.cellSize) : 2;
+    const wallHeight = Number.isFinite(config.wallHeight) ? Math.max(1, config.wallHeight) : 3;
+    const playerHeight = Number.isFinite(config.playerHeight) ? Math.max(0.5, config.playerHeight) : 1.7;
+    const eyeHeight = Number.isFinite(config.eyeHeight) ? Math.max(0.4, config.eyeHeight) : playerHeight * 0.94;
+    const playerRadius = Number.isFinite(config.playerRadius) ? Math.max(0.05, config.playerRadius) : 0.28;
+    const playerSpeed = Number.isFinite(config.playerSpeed) ? Math.max(0, config.playerSpeed) : 4;
+    const playerRotSpeed = Number.isFinite(config.playerRotSpeed) ? Math.max(0, config.playerRotSpeed) : 0.0055;
+    const spawn = this._resolveSpawn(config.spawn, map, cellSize, wallHeight, eyeHeight);
+    const fogColor = this._color(config.fogColor ?? 0x14171a);
+    const fogDensity = Number.isFinite(config.fogDensity) ? Math.max(0, config.fogDensity) : 0.012;
+    const flashlightEnabled = config.flashlight !== false;
+    const textureConfig = config.textures || {};
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(fogColor);
+    scene.fog = new THREE.FogExp2(fogColor, fogDensity);
+
+    const camera = new THREE.PerspectiveCamera(
+      Number.isFinite(config.fov) ? config.fov : 75,
+      1, 0.05, Math.max(100, map.length * cellSize * 2)
+    );
+    camera.rotation.order = "YXZ";
+    camera.position.set(spawn.x, spawn.y, spawn.z);
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: config.antialias !== false,
+      alpha: false,
+      powerPreference: "high-performance",
+      depth: true,
+      stencil: false
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Number.isFinite(config.maxPixelRatio) ? config.maxPixelRatio : 2));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.shadowMap.enabled = config.shadows === true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const ambient = new THREE.HemisphereLight(0xb8c4ca, 0x101316, Number.isFinite(config.ambientIntensity) ? config.ambientIntensity : 0.72);
+    scene.add(ambient);
+
+    const mainLight = new THREE.DirectionalLight(0xdce8ed, Number.isFinite(config.directionalIntensity) ? config.directionalIntensity : 0.9);
+    mainLight.position.set(8, 12, 6);
+    mainLight.castShadow = config.shadows === true;
+    if (mainLight.castShadow) {
+      mainLight.shadow.mapSize.set(1024, 1024);
+      mainLight.shadow.camera.near = 0.5;
+      mainLight.shadow.camera.far = Math.max(60, map.length * cellSize);
+      mainLight.shadow.camera.left = -30;
+      mainLight.shadow.camera.right = 30;
+      mainLight.shadow.camera.top = 30;
+      mainLight.shadow.camera.bottom = -30;
+    }
+    scene.add(mainLight);
+
+    const world = new THREE.Group();
+    world.name = "FLIP3D_World";
+    scene.add(world);
+
+    const wallBoxes = [];
+    const textureLoader = new THREE.TextureLoader();
+    textureLoader.setCrossOrigin("anonymous");
+
+    const materials = this._createMaterials(textureLoader, textureConfig, config);
+    const floorGeometry = new THREE.PlaneGeometry(map[0].length * cellSize, map.length * cellSize);
+    const ceilingGeometry = new THREE.PlaneGeometry(map[0].length * cellSize, map.length * cellSize);
+    const floor = new THREE.Mesh(floorGeometry, materials.floor);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(
+      (map[0].length * cellSize) / 2 - cellSize / 2,
+      0,
+      (map.length * cellSize) / 2 - cellSize / 2
+    );
+    floor.receiveShadow = config.shadows === true;
+    world.add(floor);
+
+    const ceiling = new THREE.Mesh(ceilingGeometry, materials.ceiling);
+    ceiling.rotation.x = Math.PI / 2;
+    ceiling.position.set(floor.position.x, wallHeight, floor.position.z);
+    ceiling.receiveShadow = config.shadows === true;
+    world.add(ceiling);
+
+    const wallGeometry = new THREE.BoxGeometry(cellSize, wallHeight, cellSize);
+    const wallMeshes = [];
+
+    for (let row = 0; row < map.length; row++) {
+      for (let col = 0; col < map[row].length; col++) {
+        const value = Number(map[row][col]);
+        if (!Number.isFinite(value) || value <= 0) continue;
+
+        const x = col * cellSize + cellSize / 2;
+        const z = row * cellSize + cellSize / 2;
+        const material = materials.walls[(Math.abs(Math.trunc(value)) - 1) % materials.walls.length];
+        const wall = new THREE.Mesh(wallGeometry, material);
+        wall.position.set(x, wallHeight / 2, z);
+        wall.castShadow = config.shadows === true;
+        wall.receiveShadow = config.shadows === true;
+        world.add(wall);
+        wallMeshes.push(wall);
+        wallBoxes.push({
+          minX: x - cellSize / 2,
+          maxX: x + cellSize / 2,
+          minZ: z - cellSize / 2,
+          maxZ: z + cellSize / 2
+        });
+      }
+    }
+
+    const flashlight = new THREE.SpotLight(
+      this._color(config.flashlightColor ?? 0xffffff),
+      Number.isFinite(config.flashlightIntensity) ? config.flashlightIntensity : 3.8,
+      Number.isFinite(config.flashlightDistance) ? config.flashlightDistance : 24,
+      Number.isFinite(config.flashlightAngle) ? config.flashlightAngle : Math.PI / 7,
+      Number.isFinite(config.flashlightPenumbra) ? config.flashlightPenumbra : 0.45,
+      Number.isFinite(config.flashlightDecay) ? config.flashlightDecay : 2
+    );
+    flashlight.castShadow = config.shadows === true;
+    const flashlightTarget = new THREE.Object3D();
+    flashlightTarget.position.set(0, 0, -1);
+    camera.add(flashlightTarget);
+    flashlight.target = flashlightTarget;
+    flashlight.position.set(0, 0, 0);
+    camera.add(flashlight);
+    flashlight.visible = flashlightEnabled;
+
+    const input = {
+      joystickId: null,
+      lookId: null,
+      joystickX: 0,
+      joystickY: 0,
+      lookLastX: 0,
+      lookLastY: 0
+    };
+
+    const player = {
+      x: spawn.x,
+      y: spawn.y,
+      z: spawn.z,
+      yaw: Number.isFinite(spawn.yaw) ? spawn.yaw : 0,
+      pitch: Number.isFinite(spawn.pitch) ? spawn.pitch : 0
+    };
+
+    const state = {
+      root, canvas, scene, camera, renderer, world, floor, ceiling,
+      wallBoxes, wallMeshes, wallGeometry, floorGeometry, ceilingGeometry,
+      materials, flashlight, flashlightTarget, ambient, mainLight,
+      map, cellSize, wallHeight, playerHeight, eyeHeight, playerRadius,
+      playerSpeed, playerRotSpeed, keys, input, player,
+      clock: new THREE.Clock(), raf: 0, destroyed: false,
+      fpsFrames: 0, fpsTime: performance.now(), fps: 0,
+      lastWidth: window.innerWidth, lastHeight: window.innerHeight,
+      config, hudText, loader, loaderBar, errorBox,
+      movementEnabled: true,
+      yawSensitivity: playerRotSpeed,
+      pitchSensitivity: playerRotSpeed,
+      maxPitch: Math.PI * 0.49,
+      resizeHandler: null,
+      touchStart: null, touchMove: null, touchEnd: null
+    };
+
+    this._state = state;
+    window.FLIP3D = this;
+
+    const setProgress = value => {
+      loaderBar.style.width = Math.max(0, Math.min(100, value)) + "%";
+    };
+    setProgress(10);
+
+    state.resizeHandler = () => {
+      const w = Math.max(1, window.innerWidth);
+      const h = Math.max(1, window.innerHeight);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+      state.lastWidth = w;
+      state.lastHeight = h;
+    };
+    window.addEventListener("resize", state.resizeHandler, { passive: true });
+
+    state.keyDown = event => {
+      keys[event.code] = true;
+      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(event.code)) event.preventDefault();
+    };
+    state.keyUp = event => { keys[event.code] = false; };
+    const joystick = document.getElementById("flip-joystick");
+    const stick = document.getElementById("flip-stick");
+    const lookZone = document.getElementById("flip-look-zone");
+
+    const updateJoystick = (x, y) => {
+      const rect = joystick.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const max = rect.width * 0.30;
+      let dx = x - cx, dy = y - cy;
+      const len = Math.hypot(dx, dy);
+      if (len > max) { dx *= max / len; dy *= max / len; }
+      input.joystickX = dx / max;
+      input.joystickY = dy / max;
+      stick.style.transform = `translate(${dx}px,${dy}px)`;
+    };
+    const resetJoystick = () => {
+      input.joystickId = null;
+      input.joystickX = 0;
+      input.joystickY = 0;
+      stick.style.transform = "translate(0,0)";
+    };
+
+    state.touchStart = e => {
+      for (const t of e.changedTouches) {
+        if (t.clientX < window.innerWidth * 0.48 && input.joystickId === null) {
+          input.joystickId = t.identifier;
+          updateJoystick(t.clientX, t.clientY);
+        } else if (t.clientX >= window.innerWidth * 0.48 && input.lookId === null) {
+          input.lookId = t.identifier;
+          input.lookLastX = t.clientX;
+          input.lookLastY = t.clientY;
+        }
+      }
+      e.preventDefault();
+    };
+    state.touchMove = e => {
+      for (const t of e.changedTouches) {
+        if (t.identifier === input.joystickId) updateJoystick(t.clientX, t.clientY);
+        if (t.identifier === input.lookId) {
+          const dx = t.clientX - input.lookLastX;
+          const dy = t.clientY - input.lookLastY;
+          input.lookLastX = t.clientX;
+          input.lookLastY = t.clientY;
+          this._applyLook(dx, dy);
+        }
+      }
+      e.preventDefault();
+    };
+    state.touchEnd = e => {
+      for (const t of e.changedTouches) {
+        if (t.identifier === input.joystickId) resetJoystick();
+        if (t.identifier === input.lookId) input.lookId = null;
+      }
+      e.preventDefault();
+    };
+    joystick.addEventListener("touchstart", state.touchStart, { passive: false });
+    lookZone.addEventListener("touchstart", state.touchStart, { passive: false });
+    window.addEventListener("touchmove", state.touchMove, { passive: false });
+    window.addEventListener("touchend", state.touchEnd, { passive: false });
+    window.addEventListener("touchcancel", state.touchEnd, { passive: false });
+
+    state.joystick = joystick;
+    state.stick = stick;
+    state.lookZone = lookZone;
+    state.resetJoystick = resetJoystick;
+
+    this._applyLook = (dx, dy) => {
+      const s = this._state;
+      if (!s) return;
+      s.player.yaw -= dx * s.yawSensitivity;
+      s.player.pitch -= dy * s.pitchSensitivity;
+      s.player.pitch = Math.max(-s.maxPitch, Math.min(s.maxPitch, s.player.pitch));
+    };
+
+    this._loop = () => {
+      if (!state || state.destroyed) return;
+      const dt = Math.min(state.clock.getDelta(), 0.05);
+      this._update(dt);
+      renderer.render(scene, camera);
+      state.fpsFrames++;
+      const now = performance.now();
+      if (now - state.fpsTime >= 500) {
+        state.fps = Math.round(state.fpsFrames * 1000 / (now - state.fpsTime));
+        state.fpsFrames = 0;
+        state.fpsTime = now;
+        document.getElementById("flip-fps").textContent = "FPS: " + state.fps;
+      }
+      state.raf = requestAnimationFrame(this._loop);
+    };
+
+    state.resizeHandler();
+    setProgress(35);
+    this._updateCamera();
+    setProgress(55);
+
+    Promise.resolve().then(() => {
+      setProgress(78);
+      this._loop();
+      setProgress(100);
+      setTimeout(() => { loader.style.opacity = "0"; }, 100);
+      setTimeout(() => { loader.style.display = "none"; }, 450);
+      return this;
+    }).catch(error => {
+      this._showError(error);
+      throw error;
+    });
+
+    return this;
+  },
+
+  _update(dt) {
+    const s = this._state;
+    if (!s || !s.movementEnabled) return;
+
+    let forward = 0, strafe = 0;
+    if (s.keys.KeyW || s.keys.ArrowUp) forward += 1;
+    if (s.keys.KeyS || s.keys.ArrowDown) forward -= 1;
+    if (s.keys.KeyD || s.keys.ArrowRight) strafe += 1;
+    if (s.keys.KeyA || s.keys.ArrowLeft) strafe -= 1;
+
+    // Screen Y grows downward: negative joystickY means pushing upward.
+    // Convert that into positive world "forward".
+    forward += -s.input.joystickY;
+    strafe += s.input.joystickX;
+
+    const len = Math.hypot(forward, strafe);
+    if (len > 1) { forward /= len; strafe /= len; }
+
+    // Camera looks along its local -Z axis. The movement vector must use
+    // the same forward/right basis so pushing the joystick upward moves forward.
+    const sin = Math.sin(s.player.yaw);
+    const cos = Math.cos(s.player.yaw);
+    const dx = (-sin * forward + cos * strafe) * s.playerSpeed * dt;
+    const dz = (-cos * forward - sin * strafe) * s.playerSpeed * dt;
+
+    this._moveWithCollisions(dx, dz);
+    this._updateCamera();
+  },
+
+  _moveWithCollisions(dx, dz) {
+    const s = this._state;
+    let x = s.player.x + dx;
+    let z = s.player.z + dz;
+
+    for (const box of s.wallBoxes) {
+      const nearestX = Math.max(box.minX, Math.min(x, box.maxX));
+      const nearestZ = Math.max(box.minZ, Math.min(z, box.maxZ));
+      let ox = x - nearestX;
+      let oz = z - nearestZ;
+      const distSq = ox * ox + oz * oz;
+      const r = s.playerRadius;
+
+      if (distSq < r * r) {
+        if (distSq > 1e-10) {
+          const dist = Math.sqrt(distSq);
+          const push = r - dist;
+          x += (ox / dist) * push;
+          z += (oz / dist) * push;
+        } else {
+          const left = Math.abs(x - box.minX);
+          const right = Math.abs(box.maxX - x);
+          const top = Math.abs(z - box.minZ);
+          const bottom = Math.abs(box.maxZ - z);
+          const min = Math.min(left, right, top, bottom);
+          if (min === left) x = box.minX - r;
+          else if (min === right) x = box.maxX + r;
+          else if (min === top) z = box.minZ - r;
+          else z = box.maxZ + r;
+        }
+      }
+    }
+
+    s.player.x = x;
+    s.player.z = z;
+  },
+
+  _updateCamera() {
+    const s = this._state;
+    if (!s) return;
+    s.camera.position.set(s.player.x, s.player.y, s.player.z);
+    s.camera.rotation.y = s.player.yaw;
+    s.camera.rotation.x = s.player.pitch;
+  },
+
+  _createMaterials(loader, textureConfig, config) {
+    const loadTexture = path => {
+      if (!path || typeof path !== "string") return null;
+      const texture = loader.load(
+        path,
+        tex => { tex.colorSpace = THREE.SRGBColorSpace; tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping; },
+        undefined,
+        () => {}
+      );
+      texture.colorSpace = THREE.SRGBColorSpace;
+      return texture;
+    };
+
+    const wallPaths = Array.isArray(textureConfig.wall) ? textureConfig.wall : (textureConfig.wall ? [textureConfig.wall] : []);
+    const wallTextures = wallPaths.map(loadTexture).filter(Boolean);
+    const floorTexture = loadTexture(Array.isArray(textureConfig.floor) ? textureConfig.floor[0] : textureConfig.floor);
+    const ceilingTexture = loadTexture(Array.isArray(textureConfig.ceiling) ? textureConfig.ceiling[0] : textureConfig.ceiling);
+
+    const fallbackWall = this._proceduralTexture("#62666a", "#34383c", 64, 8);
+    const fallbackFloor = this._proceduralTexture("#484c50", "#2b2e31", 64, 8);
+    const fallbackCeiling = this._proceduralTexture("#292c2f", "#202326", 64, 8);
+
+    const makeStandard = (map, color, roughness = 0.82) => new THREE.MeshStandardMaterial({
+      map: map || null,
+      color: map ? 0xffffff : color,
+      roughness,
+      metalness: 0
+    });
+
+    return {
+      walls: (wallTextures.length ? wallTextures : [fallbackWall]).map(t => makeStandard(t, 0x62666a)),
+      floor: makeStandard(floorTexture || fallbackFloor, 0x484c50),
+      ceiling: makeStandard(ceilingTexture || fallbackCeiling, 0x292c2f)
+    };
+  },
+
+  _proceduralTexture(base, grid, size, cells) {
+    const c = document.createElement("canvas");
+    c.width = c.height = size;
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = base;
+    ctx.fillRect(0, 0, size, size);
+    ctx.strokeStyle = grid;
+    ctx.lineWidth = 1;
+    const step = size / cells;
+    for (let i = 0; i <= cells; i++) {
+      const p = Math.round(i * step) + 0.5;
+      ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, size); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(size, p); ctx.stroke();
+    }
+    const texture = new THREE.CanvasTexture(c);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    return texture;
+  },
+
+  _validateMap(map) {
+    if (!Array.isArray(map) || map.length < 1 || !Array.isArray(map[0]) || map[0].length < 1) {
+      throw new Error("FLIP3D.init: config.map must be a non-empty two-dimensional array.");
+    }
+    const width = map[0].length;
+    for (let r = 0; r < map.length; r++) {
+      if (!Array.isArray(map[r]) || map[r].length !== width) {
+        throw new Error("FLIP3D.init: config.map must be rectangular.");
+      }
+    }
+    return map;
+  },
+
+  _resolveSpawn(spawn, map, cellSize, wallHeight, eyeHeight) {
+    if (spawn && Number.isFinite(spawn.x) && Number.isFinite(spawn.z)) {
+      return {
+        x: spawn.x,
+        y: Number.isFinite(spawn.y) ? spawn.y : eyeHeight,
+        z: spawn.z,
+        yaw: Number.isFinite(spawn.yaw) ? spawn.yaw : 0,
+        pitch: Number.isFinite(spawn.pitch) ? spawn.pitch : 0
+      };
+    }
+    for (let r = 0; r < map.length; r++) {
+      for (let c = 0; c < map[r].length; c++) {
+        if (Number(map[r][c]) === 0) {
+          return {
+            x: c * cellSize + cellSize / 2,
+            y: eyeHeight,
+            z: r * cellSize + cellSize / 2,
+            yaw: 0,
+            pitch: 0
+          };
+        }
+      }
+    }
+    return { x: cellSize / 2, y: eyeHeight, z: cellSize / 2, yaw: 0, pitch: 0 };
+  },
+
+  _color(value) {
+    if (value instanceof THREE.Color) return value;
+    return new THREE.Color(value);
+  },
+
+  isAndroidTarget() {
+    return true;
+  },
+
+  setTouchControlsVisible(visible) {
+    const s = this._state;
+    if (!s) return;
+    const display = visible ? "block" : "none";
+    s.joystick.style.display = display;
+    s.lookZone.style.display = display;
+  },
+
+  updateHUD(text) {
+    const s = this._state;
+    if (!s) return;
+    s.hudText.textContent = text == null ? "" : String(text);
+  },
+
+  setFog(color, density) {
+    const s = this._state;
+    if (!s) return;
+    const c = this._color(color);
+    s.scene.background.copy(c);
+    s.scene.fog = new THREE.FogExp2(c, Math.max(0, Number(density) || 0));
+  },
+
+  setFlashlight(enabled, options = {}) {
+    const s = this._state;
+    if (!s) return;
+    s.flashlight.visible = !!enabled;
+    if (options.color != null) s.flashlight.color.set(options.color);
+    if (Number.isFinite(options.intensity)) s.flashlight.intensity = options.intensity;
+    if (Number.isFinite(options.distance)) s.flashlight.distance = options.distance;
+    if (Number.isFinite(options.angle)) s.flashlight.angle = options.angle;
+    if (Number.isFinite(options.penumbra)) s.flashlight.penumbra = options.penumbra;
+    if (Number.isFinite(options.decay)) s.flashlight.decay = options.decay;
+  },
+
+  setPlayerPosition(x, y, z) {
+    const s = this._state;
+    if (!s) return;
+    if (Number.isFinite(x)) s.player.x = x;
+    if (Number.isFinite(y)) s.player.y = y;
+    if (Number.isFinite(z)) s.player.z = z;
+    this._updateCamera();
+  },
+
+  getPlayerPosition() {
+    const s = this._state;
+    if (!s) return null;
+    return { x: s.player.x, y: s.player.y, z: s.player.z };
+  },
+
+  setPlayerRotation(yaw, pitch = 0) {
+    const s = this._state;
+    if (!s) return;
+    if (Number.isFinite(yaw)) s.player.yaw = yaw;
+    if (Number.isFinite(pitch)) s.player.pitch = Math.max(-s.maxPitch, Math.min(s.maxPitch, pitch));
+    this._updateCamera();
+  },
+
+  saveState(key, dataObject) {
+    localStorage.setItem(String(key), JSON.stringify(dataObject));
+  },
+
+  loadState(key, fallback = null) {
+    const raw = localStorage.getItem(String(key));
+    if (raw == null) return fallback;
+    try { return JSON.parse(raw); } catch (_) { return fallback; }
+  },
+
+  destroy() {
+    const s = this._state;
+    if (!s) return;
+    s.destroyed = true;
+    cancelAnimationFrame(s.raf);
+    window.removeEventListener("resize", s.resizeHandler);
+    s.joystick.removeEventListener("touchstart", s.touchStart);
+    s.lookZone.removeEventListener("touchstart", s.touchStart);
+    window.removeEventListener("touchmove", s.touchMove);
+    window.removeEventListener("touchend", s.touchEnd);
+    window.removeEventListener("touchcancel", s.touchEnd);
+
+    s.wallGeometry.dispose();
+    s.floorGeometry.dispose();
+    s.ceilingGeometry.dispose();
+    for (const mat of s.materials.walls) {
+      if (mat.map && mat.map.isCanvasTexture) mat.map.image.width = 0;
+      mat.dispose();
+    }
+    s.materials.floor.dispose();
+    s.materials.ceiling.dispose();
+    s.renderer.dispose();
+    s.scene.clear();
+    s.world.clear();
+    s.loader.style.display = "none";
+    s.errorBox.style.display = "none";
+    this._state = null;
+  },
+
+  _showError(error) {
+    const s = this._state;
+    const box = s ? s.errorBox : document.getElementById("flip-error");
+    if (box) {
+      box.textContent = "FLIP 3D: " + (error && error.message ? error.message : String(error));
+      box.style.display = "block";
+    }
+  }
+};
+
+window.FLIP3D = FLIP3D;
+
+/*
+  ANDROID-ONLY WORKING EXAMPLE FOR DEVELOPERS
+  The engine above contains no game-specific map or asset paths.
+  This example is the application/content layer used by the Android WebView.
+*/
+const demoMap16x16 = [
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,1,1,1,0,0,0,1,1,1,0,0,1],
+  [1,0,0,0,1,0,0,0,0,0,0,0,1,0,0,1],
+  [1,0,1,1,1,0,0,1,1,0,0,0,1,0,0,1],
+  [1,0,0,0,0,0,0,1,0,0,0,0,1,0,0,1],
+  [1,0,0,1,1,1,0,1,0,1,1,0,1,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,1,1,0,1,1,0,0,0,1,1,0,1,0,1],
+  [1,0,0,0,0,0,0,0,1,0,0,0,0,1,0,1],
+  [1,0,0,1,1,0,0,0,1,0,1,1,0,1,0,1],
+  [1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1],
+  [1,0,1,0,1,0,1,1,1,1,0,1,1,0,0,1],
+  [1,0,0,0,1,0,0,0,0,0,0,0,1,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+];
+
+FLIP3D.init({
+  map: demoMap16x16,
+  textures: {
+    wall: [],
+    floor: null,
+    ceiling: null
+  },
+  fogColor: 0x14171a,
+  fogDensity: 0.012,
+  flashlight: true,
+  flashlightIntensity: 3.8,
+  flashlightDistance: 24,
+  playerSpeed: 4,
+  playerRotSpeed: 0.0055,
+  cellSize: 2,
+  wallHeight: 3,
+  playerHeight: 1.7,
+  eyeHeight: 1.62,
+  playerRadius: 0.28,
+  shadows: false,
+  ambientIntensity: 0.72,
+  directionalIntensity: 0.9
+});
+
+FLIP3D.updateHUD("DEMO");
+</script>
+</body>
+</html>
